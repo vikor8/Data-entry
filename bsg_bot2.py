@@ -1,7 +1,7 @@
 #!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-BSG Аналитик - Telegram бот для анализа данных из базы данных workshop_data.db.
+BSG Аналитик - Telegram бот для анализа данных из базы данных workshop_data_1.db.
 """
 import logging
 import sqlite3
@@ -15,6 +15,7 @@ from telegram.ext import (
     filters,
     ContextTypes,
 )
+
 # === НАСТРОЙКИ ===
 # Включаем логирование
 logging.basicConfig(
@@ -22,13 +23,18 @@ logging.basicConfig(
     level=logging.INFO
 )
 logger = logging.getLogger(__name__)
+
 # Токен бота (используем предоставленный токен)
 TOKEN = "8414355250:AAGyGpcYMIGgeR6hKAF35niRT0HE06zyke4"
+
 # Путь к базе данных, созданной первым ботом
-DB_PATH = "/srv/dev-disk-by-uuid-6cbacaea-af88-4ced-8990-f4f163606aae/home/bot/workshop_data.db"
-# Имя таблицы участка упаковки
+DB_PATH = "/srv/dev-disk-by-uuid-6cbacaea-af88-4ced-8990-f4f163606aae/home/bot/workshop_data_1.db"
+
+# Имя таблицы участка упаковки (адаптировано под формат первого бота)
 PACKAGING_TABLE_NAME = "Участок_упаковки"
+
 # === ФУНКЦИИ РАБОТЫ С БАЗОЙ ДАННЫХ ===
+
 def get_table_names():
     """Получает список имен таблиц из базы данных."""
     try:
@@ -42,24 +48,45 @@ def get_table_names():
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении списка таблиц: {e}")
         return []
+
+def get_user_full_name(telegram_id):
+    """Получение Ф.И.О. пользователя по telegram_id из таблицы users"""
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        cursor.execute('SELECT full_name FROM users WHERE telegram_id = ?', (telegram_id,))
+        result = cursor.fetchone()
+        conn.close()
+        return result[0] if result else "-"
+    except Exception as e:
+        logger.error(f"Ошибка в get_user_full_name: {e}")
+        return "-"
+
 def search_by_order(order_number: str):
     """
     Ищет все изделия по номеру заказа во всех таблицах.
-    Возвращает словарь: {участок: [(qr_data, creation_date, modification_date), ...]}
+    Возвращает словарь: {участок: [(qr_data, telegram_id, creation_date, modification_date), ...]}
     """
     results = defaultdict(list)
     tables = get_table_names()
     if not tables:
         logger.warning("Список таблиц пуст или ошибка подключения к БД.")
         return results
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
-    # Создаем паттерн для поиска qr_data, начинающихся с номера заказа и точки
-    pattern = f"{order_number}.%"
+    
+    # Создаем паттерн для поиска qr_data, начинающихся с номера заказа
+    pattern = f"{order_number}%"
+    
     for table in tables:
+        # Пропускаем служебные таблицы
+        if table in ['users', 'user_creation_dates']:
+            continue
+            
         try:
             cursor.execute(f'''
-                SELECT qr_data, creation_date, modification_date 
+                SELECT qr_data, telegram_id, creation_date, modification_date 
                 FROM "{table}" 
                 WHERE qr_data LIKE ?
             ''', (pattern,))
@@ -70,35 +97,44 @@ def search_by_order(order_number: str):
                 results[readable_workshop].extend(rows)
         except sqlite3.Error as e:
             logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
+    
     conn.close()
     logger.info(f"Поиск по заказу {order_number}: найдено в {len(results)} участках")
     return results
+
 def search_by_item(item_number: str):
     """
     Ищет конкретное изделие по его полному номеру во всех таблицах.
-    Возвращает список: [(участок, qr_data, creation_date, modification_date)]
+    Возвращает список: [(участок, qr_data, telegram_id, creation_date, modification_date)]
     """
     results = []
     tables = get_table_names()
     if not tables:
         logger.warning("Список таблиц пуст или ошибка подключения к БД.")
         return results
+    
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    
     for table in tables:
+        # Пропускаем служебные таблицы
+        if table in ['users', 'user_creation_dates']:
+            continue
+            
         try:
             cursor.execute(f'''
-                SELECT qr_data, creation_date, modification_date 
+                SELECT qr_data, telegram_id, creation_date, modification_date 
                 FROM "{table}" 
-                WHERE qr_data = ?
-            ''', (item_number,))
+                WHERE qr_data LIKE ?
+            ''', (f'{item_number}%',))
             rows = cursor.fetchall()
             if rows:
                 readable_workshop = table.replace("_", " ")
                 for row in rows:
-                    results.append((readable_workshop, row[0], row[1], row[2]))
+                    results.append((readable_workshop, row[0], row[1], row[2], row[3]))
         except sqlite3.Error as e:
             logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
+    
     conn.close()
     logger.info(f"Поиск по изделию {item_number}: найдено {len(results)} записей")
     return results
@@ -106,15 +142,15 @@ def search_by_item(item_number: str):
 def search_packaged_items(order_number: str):
     """
     Ищет все изделия по номеру заказа, которые прошли через участок упаковки.
-    Возвращает список: [(qr_data, creation_date, modification_date)]
+    Возвращает список: [(qr_data, telegram_id, creation_date, modification_date)]
     """
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        # Создаем паттерн для поиска qr_data, начинающихся с номера заказа и точки
-        pattern = f"{order_number}.%"
+        # Создаем паттерн для поиска qr_data, начинающихся с номера заказа
+        pattern = f"{order_number}%"
         cursor.execute(f'''
-            SELECT qr_data, creation_date, modification_date 
+            SELECT qr_data, telegram_id, creation_date, modification_date 
             FROM "{PACKAGING_TABLE_NAME}" 
             WHERE qr_data LIKE ?
         ''', (pattern,))
@@ -130,12 +166,12 @@ def format_table_data(data, headers):
     """
     Форматирует данные в виде таблицы с использованием моноширинного шрифта.
     """
-    if not data:  # Исправлено: добавлено условие проверки data
+    if not data:
         return ""
     
     # Рассчитываем максимальную ширину для каждого столбца
     col_widths = [len(str(header)) for header in headers]
-    for row in data:  # Исправлено: убрана лишняя проверка, так как мы уже проверили data выше
+    for row in data:
         for i, cell in enumerate(row):
             col_widths[i] = max(col_widths[i], len(str(cell)))
     
@@ -154,16 +190,18 @@ def format_table_data(data, headers):
         table_lines.append(format_str.format(*[str(cell) for cell in row]))
     
     return "```\n" + "\n".join(table_lines) + "\n```"
+
 # === ОБРАБОТЧИКИ СООБЩЕНИЙ TELEGRAM ===
+
 async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
     """Отправляет приветственное сообщение при команде /start."""
     welcome_text = (
         "🤖 *BSG Аналитик*\n\n"
         "🔍 Я предоставляю информацию о заказах и изделиях.\n\n"
         "📤 *Как пользоваться:*\n"
-        "• Введите *номер заказа* (например, `123` или `123/1` или `123_1`)\n"
-        "• Введите *номер изделия* (например, `123.45` или `123/1.05` или `123_1.05`)\n"
-        "• Используйте /packaged_items `<номер_заказа>` для поиска упакованных изделий\n"
+        "• Введите *номер заказа* (например, `152/1` или `123`)\n"
+        "• Введите *номер изделия* (например, `152/1.28` или `123.45`)\n"
+        "• Используйте /packaged\\_items `номер_заказа` для поиска упакованных изделий\n"
         "• Используйте /help для справки\n"
     )
     await update.message.reply_text(welcome_text, parse_mode='Markdown')
@@ -173,13 +211,13 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
     help_text = (
         "📖 *Справка BSG Аналитик*\n\n"
         "🔎 *Поиск по заказу:*\n"
-        "Отправьте номер заказа (например, `123`, `123/1`, `123_1`).\n"
+        "Отправьте номер заказа (например, `152/1`, `123`).\n"
         "Бот покажет все изделия из этого заказа по всем участкам.\n\n"
         "🔎 *Поиск по изделию:*\n"
-        "Отправьте полный номер изделия (например, `123.45`, `123/1.05`, `123_1.05`).\n"
+        "Отправьте полный номер изделия (например, `152/1.28`, `123.45`).\n"
         "Бот покажет, на каких участках это изделие было запущено.\n\n"
         "📦 *Поиск упакованных изделий:*\n"
-        "Используйте команду `/packaged_items <номер_заказа>` (например, `/packaged_items 123` или `/packaged_items 123/1`).\n"
+        "Используйте команду `/packaged_items номер_заказа` (например, `/packaged_items 152/1`).\n"
         "Бот покажет все изделия из этого заказа, прошедшие через участок упаковки.\n\n"
         "❌ *Если данные не найдены:*\n"
         "Бот ответит: _\"Не запускали в работу\"_."
@@ -192,7 +230,7 @@ async def packaged_items_command(update: Update, context: ContextTypes.DEFAULT_T
     if not context.args:
         await update.message.reply_text(
             "❗ Пожалуйста, укажите номер заказа после команды.\n"
-            "Пример: `/packaged_items 123` или `/packaged_items 123/1`",
+            "Пример: `/packaged_items 152/1` или `/packaged_items 123`",
             parse_mode='Markdown'
         )
         return
@@ -203,7 +241,7 @@ async def packaged_items_command(update: Update, context: ContextTypes.DEFAULT_T
     if not re.match(r'^[\d/_]+$', order_number):
         await update.message.reply_text(
             "❗ Пожалуйста, введите корректный номер заказа (цифры, слэши и подчеркивания).\n"
-            "Пример: `/packaged_items 123` или `/packaged_items 123/1`",
+            "Пример: `/packaged_items 152/1` или `/packaged_items 123`",
             parse_mode='Markdown'
         )
         return
@@ -218,13 +256,15 @@ async def packaged_items_command(update: Update, context: ContextTypes.DEFAULT_T
             return
         
         # Формируем таблицу для упакованных изделий
-        headers = ["Изделие", "Запущено", "Изменено"]
+        headers = ["Изделие", "Фамилия", "Запущено", "Изменено"]
         table_data = []
-        for qr_data, creation_date, modification_date in packaged_results:
+        for qr_data, telegram_id, creation_date, modification_date in packaged_results:
+            # Получаем Ф.И.О. пользователя
+            full_name = get_user_full_name(telegram_id)
             # Форматируем даты
             creation_short = creation_date.split()[0] if creation_date else "-"
             modification_short = modification_date.split()[0] if modification_date else "-"
-            table_data.append([qr_data, creation_short, modification_short])
+            table_data.append([qr_data, full_name, creation_short, modification_short])
         
         table_str = format_table_data(table_data, headers)
         response = f"📦 *Упакованные изделия заказа {order_number}:*\n\n{table_str}"
@@ -242,16 +282,19 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
     """Обрабатывает текстовые сообщения пользователя."""
     user_input = update.message.text.strip()
     logger.info(f"Получен запрос от пользователя: '{user_input}'")
+    
     # Проверка формата ввода: допускаем цифры, точки, слэши и подчеркивания
     if not re.match(r'^[\d./_]+$', user_input):
         await update.message.reply_text(
-            "❗ Пожалуйста, введите корректный номер заказа (например, `123`, `123/1`, `123_1`) или изделия (например, `123.45`, `123/1.05`, `123_1.05`).",
+            "❗ Пожалуйста, введите корректный номер заказа (например, `152/1`, `123`) или изделия (например, `152/1.28`, `123.45`).",
             parse_mode='Markdown'
         )
         return
+    
     # Определяем, что ввел пользователь: заказ или изделие
     # Если содержит точку и после точки есть цифры - это изделие
-    is_item_search = '.' in user_input and user_input.split('.')[-1].isdigit()
+    is_item_search = '.' in user_input and re.search(r'\.(\d+)', user_input)
+    
     try:
         if is_item_search:
             # === Поиск по номеру изделия ===
@@ -260,16 +303,20 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not item_results:
                 await update.message.reply_text("📭 _Не запускали в работу_", parse_mode='Markdown')
                 return
+            
             # Формируем таблицу для результатов по изделию
-            headers = ["Участок", "Запущено", "Изменено"]
+            headers = ["Участок", "Фамилия", "Запущено", "Изменено"]
             table_data = []
-            for workshop, qr_data, creation_date, modification_date in item_results:
-                # Форматируем даты (берем только дату без времени для компактности)
+            for workshop, qr_data, telegram_id, creation_date, modification_date in item_results:
+                # Получаем Ф.И.О. пользователя
+                full_name = get_user_full_name(telegram_id)
+                # Форматируем даты
                 creation_short = creation_date.split()[0] if creation_date else "-"
                 modification_short = modification_date.split()[0] if modification_date else "-"
-                table_data.append([workshop, creation_short, modification_short])
+                table_data.append([workshop, full_name, creation_short, modification_short])
+            
             table_str = format_table_data(table_data, headers)
-            response = f"📋 *Информация об изделии {user_input}:*\n\n{table_str}"
+            response = f"🔧 *Информация об изделии {user_input}:*\n\n{table_str}"
         else:
             # === Поиск по номеру заказа ===
             logger.info(f"Выполняется поиск по заказу: {user_input}")
@@ -277,38 +324,52 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             if not order_results:
                 await update.message.reply_text("📭 _Не запускали в работу_", parse_mode='Markdown')
                 return
+            
             # Собираем все уникальные изделия для отображения в конце
             all_items = set()
             # Формируем таблицы для каждого участка
-            response = f"📦 *Информация по заказу {user_input}:*\n\n"
+            response = f"📊 *Информация по заказу {user_input}:*\n\n"
+            
             for workshop, items in order_results.items():
                 response += f"📍 *{workshop}*\n"
                 # Создаем таблицу для изделий на этом участке
-                headers = ["Изделие", "Запущено", "Изменено"]
+                headers = ["Изделие", "Фамилия", "Запущено", "Изменено"]
                 table_data = []
-                for qr_data, creation_date, modification_date in items:
+                for qr_data, telegram_id, creation_date, modification_date in items:
                     # Добавляем изделие в общий список
                     all_items.add(qr_data)
+                    # Получаем Ф.И.О. пользователя
+                    full_name = get_user_full_name(telegram_id)
                     # Форматируем даты
                     creation_short = creation_date.split()[0] if creation_date else "-"
                     modification_short = modification_date.split()[0] if modification_date else "-"
-                    table_data.append([qr_data, creation_short, modification_short])
+                    table_data.append([qr_data, full_name, creation_short, modification_short])
+                
                 table_str = format_table_data(table_data, headers)
                 response += f"{table_str}\n\n"
+            
             # Добавляем список всех изделий в конце
             if all_items:
-                sorted_items = sorted(all_items, key=lambda x: [int(i) if i.isdigit() else i for i in x.split('.')])
+                sorted_items = sorted(all_items)
                 items_list = "\n".join([f"• `{item}`" for item in sorted_items])
-                response += f"*Все изделия заказа {user_input}:*\n{items_list}"
+                response += f"*📋 Все изделия заказа {user_input}:*\n{items_list}"
+        
         # Отправляем ответ пользователю
+        # Проверяем длину сообщения
+        if len(response) > 4096:
+            response = response[:4000] + "\n\n... (сообщение слишком длинное)"
+        
         await update.message.reply_text(response, parse_mode='Markdown')
+        
     except Exception as e:
         logger.error(f"Ошибка при обработке запроса '{user_input}': {e}")
         await update.message.reply_text(
             "⚠️ Произошла ошибка при обработке вашего запроса. Пожалуйста, попробуйте позже.",
             parse_mode='Markdown'
         )
+
 # === ГЛАВНАЯ ФУНКЦИЯ ===
+
 def main() -> None:
     """Запуск бота."""
     logger.info("Инициализация бота BSG Аналитик...")
@@ -317,10 +378,11 @@ def main() -> None:
     # Добавляем обработчики
     application.add_handler(CommandHandler("start", start))
     application.add_handler(CommandHandler("help", help_command))
-    application.add_handler(CommandHandler("packaged_items", packaged_items_command)) # Новый обработчик
+    application.add_handler(CommandHandler("packaged_items", packaged_items_command))
     application.add_handler(MessageHandler(filters.TEXT & ~filters.COMMAND, handle_message))
     logger.info("Бот запущен. Ожидание сообщений...")
     # Запускаем бота
     application.run_polling()
+
 if __name__ == '__main__':
     main()
