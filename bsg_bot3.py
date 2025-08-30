@@ -38,7 +38,8 @@ logger = logging.getLogger(__name__)
 TOKEN = "8414355250:AAGyGpcYMIGgeR6hKAF35niRT0HE06zyke4"
 
 # Путь к базе данных, созданной первым ботом
-DB_PATH = "/srv/dev-disk-by-uuid-6cbacaea-af88-4ced-8990-f4f163606aae/home/bot/workshop_data_1.db"
+DB_PATH = "/home/viktor/Data-entry/workshop_data_1.db"
+
 
 # Имя таблицы участка упаковки (адаптировано под формат первого бота)
 PACKAGING_TABLE_NAME = "Участок_упаковки"

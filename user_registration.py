@@ -19,8 +19,7 @@ logger = logging.getLogger(__name__)
 WAITING_FOR_FULL_NAME = 1
 
 # Путь к базе данных (должен совпадать с основным ботом)
-DB_PATH = "/srv/dev-disk-by-uuid-6cbacaea-af88-4ced-8990-f4f163606aae/home/bot/workshop_data_1.db"
-
+DB_PATH = "/home/viktor/Data-entry/workshop_data_1.db"
 def is_user_registered(telegram_id):
     """Проверяет, зарегистрирован ли пользователь в базе данных."""
     try:
