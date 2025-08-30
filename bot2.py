@@ -18,7 +18,7 @@ logging.basicConfig(
 TOKEN = "8276595091:AAFQ9svHr5Upeo27cTRXKjxEdMvUmRwQ41E"
 
 # Полный путь к базе данных
-DB_PATH = "/home/viktor/bsg_bot1/Data-entry/workshop_data_1.db"
+DB_PATH = "/home/viktor/Data-entry/workshop_data_1.db"
 
 
 
