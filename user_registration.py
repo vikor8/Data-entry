@@ -81,8 +81,7 @@ async def handle_full_name_input(update: Update, context: ContextTypes.DEFAULT_T
     if not full_name or len(full_name.split()) < 2:
         await update.message.reply_text(
             "❌ Неверный формат Ф.И.О.\n\n"
-            "Пожалуйста, введите ваше *Ф.И.О.* в одном из форматов:\n"
-            "• `Иванов Иван Иванович`\n"
+            "Пожалуйста, введите ваше *Ф.И.О.* в формате:\n"
             "• `Иванов И.И.`\n\n"
             "Попробуйте еще раз:"
         )
