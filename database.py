@@ -1,7 +1,6 @@
-#!/usr/bin/env python3
 # -*- coding: utf-8 -*-
 """
-Модуль работы с базой данных для BSG Аналитик бота (обновлён с поддержкой аутсорсинга)
+Модуль работы с базой данных для BSG Аналитик бота (обновлён с поддержкой типов изделий)
 """
 import logging
 import sqlite3
@@ -17,28 +16,63 @@ DB_PATH = "/home/viktor/freedom/workshop_data_1.db"
 # Имя таблицы участка упаковки
 PACKAGING_TABLE_NAME = "Участок_упаковки"
 
+# === Функции для работы с типами изделий ===
+
+def get_type_id_by_suffix(suffix: str) -> int:
+    """
+    Возвращает ID типа изделия по суффиксу (без учёта регистра)
+    z -> закладная (2)
+    r -> рекламация (3)
+    остальное -> изделие (1)
+    """
+    suffix = suffix.lower().strip()
+    if suffix == 'z':
+        return 2  # закладная
+    elif suffix == 'r':
+        return 3  # рекламация
+    else:
+        return 1  # изделие
+
+def strip_suffix(item_number: str) -> tuple:
+    """
+    Удаляет суффикс z/r из номера изделия.
+    Возвращает (базовый_номер, суффикс)
+    """
+    if not item_number:
+        return item_number, ''
+    if item_number[-1:].lower() in ['z', 'r']:
+        return item_number[:-1], item_number[-1]
+    return item_number, ''
+
+# === Основные функции поиска ===
+
 def get_table_names():
-    """Получает список имен таблиц из базы данных."""
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute("SELECT name FROM sqlite_master WHERE type='table';")
-        tables = [row[0] for row in cursor.fetchall()]
+        all_tables = [row[0] for row in cursor.fetchall()]
         conn.close()
-        logger.info(f"Найдено таблиц: {len(tables)}")
-        return tables
+
+        excluded = {'users', 'user_creation_dates', 'аутсорсинг', 'тип_изделия', 'sqlite_sequence'}
+        return [t for t in all_tables if t not in excluded]
     except sqlite3.Error as e:
         logger.error(f"Ошибка при получении списка таблиц: {e}")
         return []
 
 def search_by_order(order_number: str):
     """
-    Ищет все изделия по номеру заказа во всех таблицах, включая аутсорсинг.
-    Возвращает словарь: {участок: [(qr_data, telegram_id, creation_date, modification_date), ...]}
-    Для аутсорсинга:
-        - если есть дата_заявки → добавляется в 'Аутсорсинг' как "отправлен на аутсорс"
-        - если есть дата_получения → не добавляется (уже в упаковке)
+    Ищет все изделия по номеру заказа.
+    Если ввод заканчивается на 'z' или 'r' — фильтрует по типу.
+    В БД хранится номер без суффикса.
     """
+    base_order, suffix = strip_suffix(order_number)
+    if not base_order:
+        logger.warning("Пустой номер заказа после удаления суффикса")
+        return defaultdict(list)
+
+    type_id = get_type_id_by_suffix(suffix) if suffix else None
+
     results = defaultdict(list)
     tables = get_table_names()
     if not tables:
@@ -47,21 +81,26 @@ def search_by_order(order_number: str):
 
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
+    pattern = f"{base_order}%"
 
-    # Паттерн для поиска по заказу
-    pattern = f"{order_number}%"
-
-    # === 1. Поиск в обычных таблицах ===
+    # Поиск в таблицах участков
     for table in tables:
-        if table in ['users', 'user_creation_dates', 'аутсорсинг']:
+        if table in ['users', 'user_creation_dates', 'аутсорсинг', 'тип_изделия']:
             continue
 
         try:
-            cursor.execute(f'''
-                SELECT qr_data, telegram_id, creation_date, modification_date 
-                FROM "{table}" 
-                WHERE qr_data LIKE ?
-            ''', (pattern,))
+            if type_id is None:
+                cursor.execute(f'''
+                    SELECT qr_data, telegram_id, creation_date, modification_date 
+                    FROM "{table}" 
+                    WHERE qr_data LIKE ?
+                ''', (pattern,))
+            else:
+                cursor.execute(f'''
+                    SELECT qr_data, telegram_id, creation_date, modification_date 
+                    FROM "{table}" 
+                    WHERE qr_data LIKE ? AND тип_изделия_id = ?
+                ''', (pattern, type_id))
             rows = cursor.fetchall()
             if rows:
                 readable_workshop = table.replace("_", " ")
@@ -69,36 +108,36 @@ def search_by_order(order_number: str):
         except sqlite3.Error as e:
             logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
 
-    # === 2. Поиск в таблице "аутсорсинг" ===
+    # Поиск в таблице "аутсорсинг"
     try:
-        cursor.execute('''
-            SELECT "артикул", "аутсорсер", "дата_заявки", "дата_получения"
-            FROM "аутсорсинг"
-            WHERE "артикул" LIKE ?
-        ''', (pattern,))
-        rows = cursor.fetchall()
-        for артикул, аутсорсер, дата_заявки, дата_получения in rows:
-            if дата_заявки and not дата_получения:
-                # Отправлен на аутсорс → добавляем в "Аутсорсинг"
-                results["Аутсорсинг"].append((
-                    артикул,
-                    аутсорсер,
-                    дата_заявки,
-                    None  # modification_date не используется
-                ))
-            # Если уже получен — не показываем в "Аутсорсинг", но может быть в "Упаковке"
+        if type_id is None or type_id == 1:  # Только для "изделие" или всех
+            cursor.execute('''
+                SELECT "артикул", "аутсорсер", "дата_заявки", "дата_получения"
+                FROM "аутсорсинг"
+                WHERE "артикул" LIKE ?
+            ''', (pattern,))
+            rows = cursor.fetchall()
+            for артикул, аутсорсер, дата_заявки, дата_получения in rows:
+                if дата_заявки and not дата_получения:
+                    results["Аутсорсинг"].append((артикул, аутсорсер, дата_заявки, None))
     except sqlite3.Error as e:
         logger.error(f"Ошибка при запросе к таблице 'аутсорсинг': {e}")
 
     conn.close()
-    logger.info(f"Поиск по заказу {order_number}: найдено в {len(results)} участках (включая аутсорсинг)")
+    logger.info(f"Поиск по заказу {order_number} (база: {base_order}, тип: {type_id}): найдено в {len(results)} участках")
     return results
 
 def search_by_item(item_number: str):
     """
-    Ищет конкретное изделие по его полному номеру во всех таблицах, включая аутсорсинг.
-    Возвращает список: [(участок, qr_data, telegram_id, creation_date, modification_date)]
+    Ищет конкретное изделие по его номеру.
+    Суффикс z/r не сохраняется в БД, используется только для определения типа.
     """
+    if not item_number:
+        return []
+
+    base_item, suffix = strip_suffix(item_number)
+    type_id = get_type_id_by_suffix(suffix)
+
     results = []
     tables = get_table_names()
     if not tables:
@@ -108,17 +147,16 @@ def search_by_item(item_number: str):
     conn = sqlite3.connect(DB_PATH)
     cursor = conn.cursor()
 
-    # === 1. Поиск в обычных таблицах ===
     for table in tables:
-        if table in ['users', 'user_creation_dates', 'аутсорсинг']:
+        if table in ['users', 'user_creation_dates', 'аутсорсинг', 'тип_изделия']:
             continue
 
         try:
             cursor.execute(f'''
                 SELECT qr_data, telegram_id, creation_date, modification_date 
                 FROM "{table}" 
-                WHERE qr_data LIKE ?
-            ''', (f'{item_number}%',))
+                WHERE qr_data = ? AND тип_изделия_id = ?
+            ''', (base_item, type_id))
             rows = cursor.fetchall()
             if rows:
                 readable_workshop = table.replace("_", " ")
@@ -127,13 +165,13 @@ def search_by_item(item_number: str):
         except sqlite3.Error as e:
             logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
 
-    # === 2. Поиск в таблице "аутсорсинг" ===
+    # Поиск в аутсорсинге (по артикулу без суффикса)
     try:
         cursor.execute('''
             SELECT "артикул", "аутсорсер", "дата_заявки", "дата_получения"
             FROM "аутсорсинг"
             WHERE "артикул" = ?
-        ''', (item_number,))
+        ''', (base_item,))
         row = cursor.fetchone()
         if row:
             артикул, аутсорсер, дата_заявки, дата_получения = row
@@ -145,7 +183,7 @@ def search_by_item(item_number: str):
         logger.error(f"Ошибка при запросе к таблице 'аутсорсинг': {e}")
 
     conn.close()
-    logger.info(f"Поиск по изделию {item_number}: найдено {len(results)} записей (включая аутсорсинг)")
+    logger.info(f"Поиск по изделию {item_number} (база: {base_item}, тип: {type_id}): найдено {len(results)} записей")
     return results
 
 def search_packaged_items(order_number: str):
@@ -155,11 +193,15 @@ def search_packaged_items(order_number: str):
     - Аутсорсинг (если есть дата получения)
     Возвращает список: [(qr_data, telegram_id, creation_date, modification_date)]
     """
+    base_order, _ = strip_suffix(order_number)
+    if not base_order:
+        return []
+
     results = []
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
-        pattern = f"{order_number}%"
+        pattern = f"{base_order}%"
 
         # 1. Участок упаковки
         cursor.execute(f'''
@@ -186,7 +228,8 @@ def search_packaged_items(order_number: str):
         logger.error(f"Ошибка при поиске упакованных изделий по заказу {order_number}: {e}")
         return []
 
-# === Остальные функции без изменений ===
+# === Остальные функции ===
+
 def is_user_registered(telegram_id):
     """Проверяет, зарегистрирован ли пользователь в базе данных."""
     try:
