@@ -16,6 +16,17 @@ DB_PATH = "/home/viktor/freedom/workshop_data_1.db"
 # Имя таблицы участка упаковки
 PACKAGING_TABLE_NAME = "Участок_упаковки"
 
+# === Вспомогательная функция для безопасного извлечения даты ===
+def safe_date(date_str):
+    """Безопасно извлекает дату из строки. Возвращает '-' при None или пустоте."""
+    if not date_str or not str(date_str).strip():
+        return "-"
+    try:
+        # Просто возвращаем строку, как в боте
+        return str(date_str).strip() # Убираем split()[0], чтобы сохранить время, если нужно
+    except:
+        return "-"
+
 # === Функции для работы с типами изделий ===
 
 def get_type_id_by_suffix(suffix: str) -> int:
@@ -104,7 +115,9 @@ def search_by_order(order_number: str):
             rows = cursor.fetchall()
             if rows:
                 readable_workshop = table.replace("_", " ")
-                results[readable_workshop].extend(rows)
+                # Добавляем имя таблицы к каждому результату для ясности
+                for row in rows:
+                    results[readable_workshop].append((readable_workshop,) + row)
         except sqlite3.Error as e:
             logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
 
@@ -118,8 +131,9 @@ def search_by_order(order_number: str):
             ''', (pattern,))
             rows = cursor.fetchall()
             for артикул, аутсорсер, дата_заявки, дата_получения in rows:
+                # Проверяем, что изделие в аутсорсинге, но еще не получено
                 if дата_заявки and not дата_получения:
-                    results["Аутсорсинг"].append((артикул, аутсорсер, дата_заявки, None))
+                    results["Аутсорсинг"].append(("Аутсорсинг", артикул, аутсорсер, дата_заявки, None))
     except sqlite3.Error as e:
         logger.error(f"Ошибка при запросе к таблице 'аутсорсинг': {e}")
 
@@ -176,9 +190,11 @@ def search_by_item(item_number: str):
         if row:
             артикул, аутсорсер, дата_заявки, дата_получения = row
             if дата_заявки and not дата_получения:
+                # В аутсорсинге, но не получено
                 results.append(("Аутсорсинг", артикул, аутсорсер, дата_заявки, None))
             elif дата_получения:
-                results.append(("Упаковка", артикул, аутсорсер, дата_заявки, дата_получения))
+                # Получено из аутсорсинга, считаем "упакованным"
+                results.append(("Упаковка (аутсорсинг)", артикул, аутсорсер, дата_заявки, дата_получения))
     except sqlite3.Error as e:
         logger.error(f"Ошибка при запросе к таблице 'аутсорсинг': {e}")
 
@@ -191,7 +207,7 @@ def search_packaged_items(order_number: str):
     Ищет все изделия по номеру заказа, которые прошли через:
     - Участок упаковки
     - Аутсорсинг (если есть дата получения)
-    Возвращает список: [(qr_data, telegram_id, creation_date, modification_date)]
+    Возвращает список: [(qr_data, fio, creation_date, modification_date)]
     """
     base_order, _ = strip_suffix(order_number)
     if not base_order:
@@ -203,13 +219,22 @@ def search_packaged_items(order_number: str):
         cursor = conn.cursor()
         pattern = f"{base_order}%"
 
-        # 1. Участок упаковки
+        # 1. Участок упаковки — добавляем telegram_id и получаем ФИО
         cursor.execute(f'''
             SELECT qr_data, telegram_id, creation_date, modification_date 
             FROM "{PACKAGING_TABLE_NAME}" 
             WHERE qr_data LIKE ?
         ''', (pattern,))
-        results.extend(cursor.fetchall())
+        rows = cursor.fetchall()
+        for row in rows:
+            qr_data, tid, created, modified = row
+            # Получаем ФИО по telegram_id
+            if tid is not None and tid != 0:
+                fio = get_user_full_name(tid)
+            else:
+                fio = "-"
+            # Для упаковки дата - это дата создания (запуска)
+            results.append((qr_data, fio, created, modified))
 
         # 2. Аутсорсинг — если есть дата получения
         cursor.execute('''
@@ -219,7 +244,12 @@ def search_packaged_items(order_number: str):
         ''', (pattern,))
         rows = cursor.fetchall()
         for артикул, аутсорсер, дата_заявки, дата_получения in rows:
-            results.append((артикул, аутсорсер, дата_заявки, дата_получения))
+            if аутсорсер is not None and аутсорсер != 0:
+                fio = get_user_full_name(аутсорсер)
+            else:
+                fio = "-"
+            # Для аутсорсинга дата - это дата получения
+            results.append((артикул, fio, дата_заявки, дата_получения))
 
         conn.close()
         logger.info(f"Поиск упакованных изделий по заказу {order_number}: найдено {len(results)} записей (включая аутсорсинг)")
@@ -269,14 +299,73 @@ def register_user(telegram_id, full_name):
         return False
 
 def get_user_full_name(telegram_id):
-    """Получение Ф.И.О. пользователя по telegram_id из таблицы users"""
+    """Получает ФИО пользователя по telegram_id."""
+    # Добавлена явная проверка на None и 0
+    if telegram_id is None or telegram_id == 0:
+        return "Неизвестно"
+
     try:
         conn = sqlite3.connect(DB_PATH)
         cursor = conn.cursor()
         cursor.execute('SELECT full_name FROM users WHERE telegram_id = ?', (telegram_id,))
         result = cursor.fetchone()
         conn.close()
-        return result[0] if result else "-"
+        return result[0] if result else "Неизвестно"
     except Exception as e:
-        logger.error(f"Ошибка в get_user_full_name: {e}")
-        return "-"
+        logger.error(f"Ошибка в get_user_full_name для ID {telegram_id}: {e}")
+        return "Неизвестно"
+
+def get_last_workshop_for_item(item_number: str):
+    """
+    Возвращает последний (по дате) участок, где было изделие.
+    Использует только таблицы, кроме "Участок_упаковки".
+    """
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        tables = get_table_names()
+        results = []
+
+        for table in tables:
+            # Исключаем упаковку из поиска "последнего участка"
+            if table == PACKAGING_TABLE_NAME:
+                continue
+            try:
+                cursor.execute(f'''
+                    SELECT qr_data, telegram_id, creation_date, modification_date
+                    FROM "{table}"
+                    WHERE qr_data = ?
+                ''', (item_number,))
+                rows = cursor.fetchall()
+                for qr, tid, created, modified in rows:
+                    # Определяем дату: сначала modification, потом creation
+                    date = modified if modified else created
+                    if not date or not str(date).strip():
+                        continue # Пропускаем записи без даты
+                    # Добавляем в результаты: (таблица, telegram_id, дата)
+                    results.append((table, tid, date))
+            except sqlite3.Error as e:
+                logger.error(f"Ошибка при поиске в таблице '{table}': {e}")
+
+        conn.close()
+
+        if not results:
+            return None
+
+        # Сортируем по дате (самая поздняя дата будет первой)
+        # Предполагаем, что дата в формате, который можно сравнить строково (ISO)
+        try:
+            results.sort(key=lambda x: x[2], reverse=True)
+        except Exception as sort_error:
+            logger.error(f"Ошибка сортировки результатов по дате: {sort_error}")
+            # Если сортировка не удалась, возвращаем первый найденный
+            pass
+
+        workshop, tid, date = results[0]
+        full_name = get_user_full_name(tid)
+        readable_workshop = workshop.replace("_", " ")
+        return (readable_workshop, full_name, safe_date(date))
+
+    except Exception as e:
+        logger.error(f"Ошибка в get_last_workshop_for_item({item_number}): {e}")
+        return None
