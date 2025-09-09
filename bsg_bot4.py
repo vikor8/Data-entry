@@ -19,16 +19,19 @@ from telegram.ext import (
 )
 
 # Импортируем функции из модуля базы данных
+# Убедитесь, что DB_PATH импортирован
 from database import (
     search_by_order,
     search_by_item,
     search_packaged_items,
+    search_items_by_type_and_status, # Новая функция
     is_user_registered,
     register_user,
     get_user_full_name,
     get_table_names,
     get_last_workshop_for_item,
-    strip_suffix
+    strip_suffix,
+    DB_PATH # Импортируем путь к БД
 )
 
 # === НАСТРОЙКИ ЛОГИРОВАНИЯ ===
@@ -187,7 +190,7 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
         # Все изделия заказа
         all_items = set()
-        conn = sqlite3.connect("/home/viktor/freedom/workshop_data_1.db")
+        conn = sqlite3.connect(DB_PATH) # Используем константу из database.py
         cursor = conn.cursor()
         pattern = f"{base_order}%"
         tables = get_table_names()
@@ -237,80 +240,23 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
             for item in sorted(packed_items_list):
                 detail = packaged_dict.get(item)
                 if detail:
-                    # detail[0] = qr_data, detail[1] = fio, detail[2] = creation_date, detail[3] = modification_date
                     qr_data, fio, created, modified = detail
-                    # Определяем участок и дату
-                    if qr_data in [row[0] for row in search_packaged_items(base_order) if 'аутсорсинг' in str(type(row)) or 'аутсорсинг' in str(row)]:
-                        # Это условие не сработает, так как search_packaged_items возвращает общий список
-                        # Лучше проверить по qr_data в таблице аутсорсинг
-                        # Но мы уже знаем, что это из search_packaged_items, где аутсорсинг идет отдельно
-                        # Проще: если qr_data начинается с буквы или содержит буквы - аутсорсинг?
-                        # Нет, это артикул. Лучше ориентироваться на структуру search_packaged_items
-                        # В search_packaged_items аутсорсинг добавляется отдельно, значит qr_data это артикул
-                        # А в Участок_упаковки qr_data это qr_data
-                        # Нужно различать, откуда пришел detail
-                        # Мы можем добавить признак в search_packaged_items, но проще проверить по qr_data в БД
-                        # Но это лишний запрос.
-                        # Пока оставим как есть, так как search_packaged_items уже правильно формирует список
-                        # и различает Упаковку и Аутсорсинг.
-                        # Но в текущем коде они оба попадают в один список.
-                        # Переделаем логику search_packaged_items чуть выше.
-                        # Сейчас в search_packaged_items:
-                        # для Упаковки: (qr_data, fio, created, modified)
-                        # для Аутсорсинга: (артикул, fio, дата_заявки, дата_получения)
-                        # Значит, если detail[3] (последний элемент) похож на дату получения (не None) - это аутсорсинг
-                        # Иначе - упаковка.
-                        # Но это не надежно.
-                        # Лучше в search_packaged_items добавить тип.
-                        # Но для простоты, проверим, есть ли этот qr_data в таблице аутсорсинг
-                        conn = sqlite3.connect("/home/viktor/freedom/workshop_data_1.db")
-                        cursor = conn.cursor()
-                        cursor.execute('SELECT "артикул" FROM "аутсорсинг" WHERE "артикул" = ?', (qr_data,))
-                        is_outsourcing = cursor.fetchone() is not None
-                        conn.close()
-                        
-                        if is_outsourcing:
-                            workshop = "Упаковка (аутсорсинг)"
-                            # Дата получения
-                            date = modified if modified else "-"
-                        else:
-                            workshop = "Упаковка"
-                            # Дата запуска (creation_date)
-                            date = created if created else "-"
+                    # Проверка на аутсорсинг (по наличию в таблице аутсорсинг)
+                    conn = sqlite3.connect(DB_PATH) # Используем константу из database.py
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT "артикул" FROM "аутсорсинг" WHERE "артикул" = ?', (qr_data,))
+                    is_outsourcing = cursor.fetchone() is not None
+                    conn.close()
+                    
+                    if is_outsourcing:
+                        workshop = "Упаковка (аутсорсинг)"
+                        date = modified if modified else (created if created else "-") # Дата получения
                     else:
-                        # Это условие не сработает, так как все элементы из search_packaged_items
-                        # Мы должны различать их внутри search_packaged_items
-                        # Переделаем search_packaged_items, чтобы она возвращала тип
-                        # Но проще добавить признак в результат
-                        # Например, добавить "Упаковка" или "Аутсорсинг" в начало кортежа
-                        # Внесем изменения в database.py
-                        # А пока сделаем так:
-                        # Предположим, что если это артикул (а не qr_data), то это аутсорсинг
-                        # Но это не всегда верно.
-                        # Лучше в search_packaged_items возвращать (тип, qr_data/артикул, fio, дата1, дата2)
-                        # Переделаем search_packaged_items
-                        
-                        # В текущем виде search_packaged_items возвращает:
-                        # для Упаковки: (qr_data, fio, created, modified)
-                        # для Аутсорсинга: (артикул, fio, дата_заявки, дата_получения)
-                        # Мы можем проверить, есть ли qr_data в таблице аутсорсинг
-                        conn = sqlite3.connect("/home/viktor/freedom/workshop_data_1.db")
-                        cursor = conn.cursor()
-                        cursor.execute('SELECT "артикул" FROM "аутсорсинг" WHERE "артикул" = ?', (qr_data,))
-                        is_outsourcing = cursor.fetchone() is not None
-                        conn.close()
-                        
-                        if is_outsourcing:
-                            workshop = "Упаковка (аутсорсинг)"
-                            date = modified if modified else "-" # дата получения
-                        else:
-                            workshop = "Упаковка"
-                            date = created if created else "-" # дата запуска
-
+                        workshop = "Упаковка"
+                        date = created if created else "-" # Дата запуска
                     table_data.append([item, workshop, fio, date])
                 else:
                      table_data.append([item, "Упаковка", "-", "-"])
-
             table_str = format_table_data(table_data, headers)
             response += f"📦 *Упакованные изделия*:\n{table_str}\n"
         else:
@@ -328,17 +274,215 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
 
     await update.message.reply_text(response, parse_mode='Markdown')
 
-# === ЗАГЛУШКИ ДЛЯ КНОПОК (возвращаются позже) ===
+# === ОБРАБОТЧИКИ КНОПОК ===
+
 async def packaging_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("📦 Временно недоступно. Используйте ввод номера заказа.")
-    return ConversationHandler.END
+    """Обработчик кнопки 'Упаковка'"""
+    await update.message.reply_text("📦 Введите номер заказа (например, `164`):", parse_mode='Markdown')
+    return WAITING_FOR_PACKAGING_ORDER
 
 async def zakladki_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("🔖 Временно недоступно. Используйте ввод номера заказа.")
-    return ConversationHandler.END
+    """Обработчик кнопки 'Закладные'"""
+    await update.message.reply_text("🔖 Введите номер заказа (например, `164`):", parse_mode='Markdown')
+    return WAITING_FOR_ZAKLADKI_ORDER
 
 async def reklamacia_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
-    await update.message.reply_text("⚠️ Временно недоступно. Используйте ввод номера заказа.")
+    """Обработчик кнопки 'Рекламация'"""
+    await update.message.reply_text("⚠️ Введите номер заказа (например, `164`):", parse_mode='Markdown')
+    return WAITING_FOR_REKLAMACIA_ORDER
+
+# === ОБРАБОТЧИКИ ВВОДА ЗАКАЗА ПОСЛЕ НАЖАТИЯ КНОПОК ===
+
+async def handle_packaging_order_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка ввода номера заказа после нажатия кнопки 'Упаковка'"""
+    return await _handle_specific_order_input(update, context, order_type="packaging")
+
+async def handle_zakladki_order_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка ввода номера заказа после нажатия кнопки 'Закладные'"""
+    return await _handle_specific_order_input(update, context, order_type="zakladki")
+
+async def handle_reklamacia_order_input(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
+    """Обработка ввода номера заказа после нажатия кнопки 'Рекламация'"""
+    return await _handle_specific_order_input(update, context, order_type="reklamacia")
+
+# --- Вспомогательная функция для обработки ---
+async def _handle_specific_order_input(update: Update, context: ContextTypes.DEFAULT_TYPE, order_type: str) -> int:
+    """Вспомогательная функция для обработки ввода заказа по типу"""
+    telegram_id = update.effective_user.id
+    if not is_user_registered(telegram_id):
+        await update.message.reply_text("❌ Зарегистрируйтесь через /start")
+        return ConversationHandler.END
+
+    user_input = update.message.text.strip()
+
+    if not re.match(r'^[\d./_]+$', user_input): # Убраны zZrR для кнопок
+        message_map = {
+            "packaging": "📦 Введите корректный номер заказа (например, `164`):",
+            "zakladki": "🔖 Введите корректный номер заказа (например, `164`):",
+            "reklamacia": "⚠️ Введите корректный номер заказа (например, `164`):",
+        }
+        await update.message.reply_text(message_map.get(order_type, "❗ Введите номер заказа."), parse_mode='Markdown')
+        state_map = {
+            "packaging": WAITING_FOR_PACKAGING_ORDER,
+            "zakladki": WAITING_FOR_ZAKLADKI_ORDER,
+            "reklamacia": WAITING_FOR_REKLAMACIA_ORDER,
+        }
+        return state_map.get(order_type, ConversationHandler.END)
+
+    base_order, _ = strip_suffix(user_input)
+    if not base_order:
+        await update.message.reply_text("❗ Неверный номер заказа.")
+        state_map = {
+            "packaging": WAITING_FOR_PACKAGING_ORDER,
+            "zakladki": WAITING_FOR_ZAKLADKI_ORDER,
+            "reklamacia": WAITING_FOR_REKLAMACIA_ORDER,
+        }
+        return state_map.get(order_type, ConversationHandler.END)
+
+    # Логика по типу кнопки
+    if order_type == "packaging":
+        # Логика для упаковки (уже реализована вами)
+        # Показываем упакованные изделия
+        packaged_items_result = search_packaged_items(base_order)
+        packaged_items_set = {item[0] for item in packaged_items_result}
+
+        if not packaged_items_set:
+            response = f"📦 *Упакованные изделия по заказу {base_order}*: _нет_"
+        else:
+            headers = ["Артикул", "Участок", "ФИО", "Дата"]
+            table_data = []
+            # Используем уже полученные данные из search_packaged_items
+            packaged_dict = {detail[0]: detail for detail in packaged_items_result}
+            
+            for item in sorted(packaged_items_set):
+                detail = packaged_dict.get(item)
+                if detail:
+                    qr_data, fio, created, modified = detail
+                    # Проверка на аутсорсинг (по наличию в таблице аутсорсинг)
+                    conn = sqlite3.connect(DB_PATH) # Используем константу из database.py
+                    cursor = conn.cursor()
+                    cursor.execute('SELECT "артикул" FROM "аутсорсинг" WHERE "артикул" = ?', (qr_data,))
+                    is_outsourcing = cursor.fetchone() is not None
+                    conn.close()
+                    
+                    if is_outsourcing:
+                        workshop = "Упаковка (аутсорсинг)"
+                        date = modified if modified else (created if created else "-") # Дата получения
+                    else:
+                        workshop = "Упаковка"
+                        date = created if created else "-" # Дата запуска
+                    table_data.append([item, workshop, fio, date])
+                else:
+                     table_data.append([item, "Упаковка", "-", "-"])
+            
+            table_str = format_table_data(table_data, headers)
+            response = f"📦 *Упакованные изделия по заказу {base_order}*:\n{table_str}"
+
+        # --- ОБРЕЗАНИЕ СООБЩЕНИЯ ---
+        if len(response) > 4096:
+            truncated = response[:4000]
+            for char in ['*', '_', '`']:
+                if truncated.count(char) % 2 != 0:
+                    last = truncated.rfind(char)
+                    if last != -1:
+                        truncated = truncated[:last]
+            response = truncated + "\n\n⚠️ *Часть данных скрыта*"
+
+        await update.message.reply_text(response, parse_mode='Markdown')
+        return ConversationHandler.END
+
+    elif order_type == "zakladki":
+        # Логика для закладных
+        item_type_id = 2 # 2 = закладная
+
+        # Получаем все изделия этого типа по заказу
+        all_items = search_items_by_type_and_status(base_order, item_type_id, is_packed=False)  # Не упакованные
+        packed_items = search_items_by_type_and_status(base_order, item_type_id, is_packed=True)  # Упакованные
+
+        # Формируем ответ
+        response = f"📋 *Закладные заказа {base_order}*:\n\n"
+
+        # Таблица 1: Активные (Не упакованы)
+        if all_items:
+            headers = ["Изделие", "Участок", "Фамилия", "Запущено"]
+            table_data = []
+            for qr_data, workshop, fio, created in all_items:
+                table_data.append([qr_data, workshop, fio, created])
+            table_str = format_table_data(table_data, headers)
+            response += f"🔴 *Активные (Не упакованы)*:\n{table_str}\n\n"
+        else:
+            response += f"🔴 *Активные (Не упакованы)*: _нет_\n\n"
+
+        # Таблица 2: Уже упакованы
+        if packed_items:
+            headers = ["Изделие", "Участок", "Фамилия", "Запущено"]
+            table_data = []
+            for qr_data, workshop, fio, created in packed_items:
+                table_data.append([qr_data, workshop, fio, created])
+            table_str = format_table_data(table_data, headers)
+            response += f"📦 *Уже упакованы*:\n{table_str}\n"
+        else:
+            response += f"📦 *Уже упакованы*: _нет_\n"
+
+        # --- ОБРЕЗАНИЕ СООБЩЕНИЯ ---
+        if len(response) > 4096:
+            truncated = response[:4000]
+            for char in ['*', '_', '`']:
+                if truncated.count(char) % 2 != 0:
+                    last = truncated.rfind(char)
+                    if last != -1:
+                        truncated = truncated[:last]
+            response = truncated + "\n\n⚠️ *Часть данных скрыта*"
+
+        await update.message.reply_text(response, parse_mode='Markdown')
+        return ConversationHandler.END
+
+    elif order_type == "reklamacia":
+        # Логика для рекламаций
+        item_type_id = 3 # 3 = рекламация
+
+        # Получаем все изделия этого типа по заказу
+        all_items = search_items_by_type_and_status(base_order, item_type_id, is_packed=False)  # Не упакованные
+        packed_items = search_items_by_type_and_status(base_order, item_type_id, is_packed=True)  # Упакованные
+
+        # Формируем ответ
+        response = f"📋 *Рекламации заказа {base_order}*:\n\n"
+
+        # Таблица 1: Активные (Не упакованы)
+        if all_items:
+            headers = ["Изделие", "Участок", "Фамилия", "Запущено"]
+            table_data = []
+            for qr_data, workshop, fio, created in all_items:
+                table_data.append([qr_data, workshop, fio, created])
+            table_str = format_table_data(table_data, headers)
+            response += f"🔴 *Активные (Не упакованы)*:\n{table_str}\n\n"
+        else:
+            response += f"🔴 *Активные (Не упакованы)*: _нет_\n\n"
+
+        # Таблица 2: Уже упакованы
+        if packed_items:
+            headers = ["Изделие", "Участок", "Фамилия", "Запущено"]
+            table_data = []
+            for qr_data, workshop, fio, created in packed_items:
+                table_data.append([qr_data, workshop, fio, created])
+            table_str = format_table_data(table_data, headers)
+            response += f"📦 *Уже упакованы*:\n{table_str}\n"
+        else:
+            response += f"📦 *Уже упакованы*: _нет_\n"
+
+        # --- ОБРЕЗАНИЕ СООБЩЕНИЯ ---
+        if len(response) > 4096:
+            truncated = response[:4000]
+            for char in ['*', '_', '`']:
+                if truncated.count(char) % 2 != 0:
+                    last = truncated.rfind(char)
+                    if last != -1:
+                        truncated = truncated[:last]
+            response = truncated + "\n\n⚠️ *Часть данных скрыта*"
+
+        await update.message.reply_text(response, parse_mode='Markdown')
+        return ConversationHandler.END
+
     return ConversationHandler.END
 
 # === СПРАВКА ===
@@ -365,12 +509,23 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
 def main() -> None:
     application = Application.builder().token(TOKEN).build()
 
-    # Регистрация
+    # Регистрация (обновляем states)
     registration_handler = ConversationHandler(
-        entry_points=[CommandHandler("start", start)],
-        states={WAITING_FOR_FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_full_name_input)]},
+        entry_points=[
+            CommandHandler("start", start),
+            # Добавляем кнопки как entry points тоже, чтобы можно было начать с них
+            MessageHandler(filters.Regex("^Упаковка$"), packaging_button_handler),
+            MessageHandler(filters.Regex("^Закладные$"), zakladki_button_handler),
+            MessageHandler(filters.Regex("^Рекламация$"), reklamacia_button_handler),
+        ],
+        states={
+            WAITING_FOR_FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_full_name_input)],
+            WAITING_FOR_PACKAGING_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_packaging_order_input)],
+            WAITING_FOR_ZAKLADKI_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_zakladki_order_input)],
+            WAITING_FOR_REKLAMACIA_ORDER: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_reklamacia_order_input)],
+        },
         fallbacks=[],
-        allow_reentry=True
+        allow_reentry=True # Позволяет перезапускать разговор
     )
 
     # Добавляем обработчики

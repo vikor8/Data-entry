@@ -258,7 +258,70 @@ def search_packaged_items(order_number: str):
         logger.error(f"Ошибка при поиске упакованных изделий по заказу {order_number}: {e}")
         return []
 
-# === Остальные функции ===
+def search_items_by_type_and_status(order_number: str, item_type_id: int, is_packed: bool = False):
+    """
+    Ищет изделия по номеру заказа, типу и статусу упаковки.
+    
+    Args:
+        order_number: Номер заказа (без суффикса)
+        item_type_id: ID типа изделия (1=изделие, 2=закладная, 3=рекламация)
+        is_packed: Если True — ищем только упакованные; если False — только не упакованные
+    
+    Returns:
+        Список кортежей: (qr_data, workshop_name, fio, creation_date)
+    """
+    if not order_number:
+        return []
+
+    results = []
+    try:
+        conn = sqlite3.connect(DB_PATH)
+        cursor = conn.cursor()
+        pattern = f"{order_number}%"
+
+        # Получаем все таблицы участков (кроме упаковки)
+        tables = get_table_names()
+        tables = [t for t in tables if t != PACKAGING_TABLE_NAME and t != "аутсорсинг"]
+
+        # Поиск в таблицах участков
+        if not is_packed:
+            for table in tables:
+                try:
+                    cursor.execute(f'''
+                        SELECT qr_data, telegram_id, creation_date 
+                        FROM "{table}" 
+                        WHERE qr_data LIKE ? AND тип_изделия_id = ?
+                    ''', (pattern, item_type_id))
+                    rows = cursor.fetchall()
+                    for row in rows:
+                        qr_data, tid, created = row
+                        fio = get_user_full_name(tid) if tid and tid != 0 else "-"
+                        workshop_name = table.replace("_", " ")
+                        results.append((qr_data, workshop_name, fio, created))
+                except sqlite3.Error as e:
+                    logger.error(f"Ошибка при запросе к таблице '{table}': {e}")
+
+        # Если нужно найти только упакованные — добавляем из Участок_упаковки
+        if is_packed:
+            cursor.execute(f'''
+                SELECT qr_data, telegram_id, creation_date 
+                FROM "{PACKAGING_TABLE_NAME}" 
+                WHERE qr_data LIKE ? AND тип_изделия_id = ?
+            ''', (pattern, item_type_id))
+            rows = cursor.fetchall()
+            for row in rows:
+                qr_data, tid, created = row
+                fio = get_user_full_name(tid) if tid and tid != 0 else "-"
+                workshop_name = "Упаковка"
+                results.append((qr_data, workshop_name, fio, created))
+
+        conn.close()
+        logger.info(f"Поиск изделий по заказу {order_number}, тип {item_type_id}, упаковано={is_packed}: найдено {len(results)} записей")
+        return results
+    except sqlite3.Error as e:
+        logger.error(f"Ошибка при поиске изделий по заказу {order_number}: {e}")
+        return []
+
 
 def is_user_registered(telegram_id):
     """Проверяет, зарегистрирован ли пользователь в базе данных."""
