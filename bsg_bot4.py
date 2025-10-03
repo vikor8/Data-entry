@@ -34,6 +34,9 @@ from database import (
     DB_PATH # Импортируем путь к БД
 )
 
+# === ИМПОРТ ИЗ DEVELOPMENT ===
+from development import get_future_orders
+
 # === НАСТРОЙКИ ЛОГИРОВАНИЯ ===
 logging.basicConfig(
     format='%(asctime)s - %(name)s - %(levelname)s - %(message)s',
@@ -83,10 +86,13 @@ async def start(update: Update, context: ContextTypes.DEFAULT_TYPE) -> int:
             "📤 *Как пользоваться:*\n"
             "• Введите *номер заказа* (например, `164`)\n"
             "• Введите *номер изделия* (например, `164.21`)\n"
-            "• Используйте кнопки *'Упаковка'*, *'Закладные'*, *'Рекламация'*\n"
+            "• Используйте кнопки *'Упаковка'*, *'Закладные'*, *'Рекламация'*, *'КБ'*\n"
             "• Используйте /help для справки\n"
         )
-        keyboard = [[KeyboardButton("Упаковка"), KeyboardButton("Закладные")], [KeyboardButton("Рекламация")]]
+        keyboard = [
+            [KeyboardButton("Упаковка"), KeyboardButton("Закладные")],
+            [KeyboardButton("Рекламация"), KeyboardButton("КБ")]
+        ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(welcome_text, parse_mode='Markdown', reply_markup=reply_markup)
         return ConversationHandler.END
@@ -122,13 +128,44 @@ async def handle_full_name_input(update: Update, context: ContextTypes.DEFAULT_T
             f"Добро пожаловать, {full_name}!\n\n"
             "🔍 Теперь вы можете использовать все функции бота."
         )
-        keyboard = [[KeyboardButton("Упаковка"), KeyboardButton("Закладные")], [KeyboardButton("Рекламация")]]
+        keyboard = [
+            [KeyboardButton("Упаковка"), KeyboardButton("Закладные")],
+            [KeyboardButton("Рекламация"), KeyboardButton("КБ")]
+        ]
         reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
         await update.message.reply_text(success_text, parse_mode='Markdown', reply_markup=reply_markup)
         return ConversationHandler.END
     else:
         await update.message.reply_text("❌ Ошибка при регистрации.")
         return ConversationHandler.END
+
+# === ОБРАБОТЧИК КНОПКИ КБ ===
+async def kb_button_handler(update: Update, context: ContextTypes.DEFAULT_TYPE):
+    telegram_id = update.effective_user.id
+    if not is_user_registered(telegram_id):
+        await update.message.reply_text("❌ Зарегистрируйтесь через /start")
+        return
+
+    orders = get_future_orders()
+    if not orders:
+        await update.message.reply_text("📋 *Будущих заказов нет.*", parse_mode='Markdown')
+        return
+
+    headers = ["№заказа", "Заказчик", "Город", "Дата отгрузки"]
+    table_str = format_table_data(orders, headers)
+    response = f"📋 *Будущие заказы из КБ*:\n\n{table_str}"
+
+    # --- ОБРЕЗАНИЕ СООБЩЕНИЯ ---
+    if len(response) > 4096:
+        truncated = response[:4000]
+        for char in ['*', '_', '`']:
+            if truncated.count(char) % 2 != 0:
+                last = truncated.rfind(char)
+                if last != -1:
+                    truncated = truncated[:last]
+        response = truncated + "\n\n⚠️ *Часть данных скрыта*"
+
+    await update.message.reply_text(response, parse_mode='Markdown')
 
 # === ОСНОВНОЙ ОБРАБОТЧИК СООБЩЕНИЙ ===
 async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> None:
@@ -147,6 +184,9 @@ async def handle_message(update: Update, context: ContextTypes.DEFAULT_TYPE) -> 
         return
     elif user_input == "Рекламация":
         await reklamacia_button_handler(update, context)
+        return
+    elif user_input == "КБ":
+        await kb_button_handler(update, context)
         return
 
     if not re.match(r'^[\d./_zZrR]+$', user_input):
@@ -498,10 +538,14 @@ async def help_command(update: Update, context: ContextTypes.DEFAULT_TYPE) -> No
         "🔍 *Поиск по изделию:* `164.21`\n"
         "📦 *Упаковка:* нажмите и введите заказ\n"
         "🔖 *Закладные:* нажмите и введите заказ\n"
-        "⚠️ *Рекламация:* нажмите и введите заказ\n\n"
+        "⚠️ *Рекламация:* нажмите и введите заказ\n"
+        "📋 *КБ:* нажмите, чтобы посмотреть будущие заказы\n\n"
         "💡 *Примечание:* Закладные и рекламации не показываются, если изделие уже упаковано."
     )
-    keyboard = [[KeyboardButton("Упаковка"), KeyboardButton("Закладные")], [KeyboardButton("Рекламация")]]
+    keyboard = [
+        [KeyboardButton("Упаковка"), KeyboardButton("Закладные")],
+        [KeyboardButton("Рекламация"), KeyboardButton("КБ")]
+    ]
     reply_markup = ReplyKeyboardMarkup(keyboard, resize_keyboard=True)
     await update.message.reply_text(help_text, parse_mode='Markdown', reply_markup=reply_markup)
 
@@ -517,6 +561,7 @@ def main() -> None:
             MessageHandler(filters.Regex("^Упаковка$"), packaging_button_handler),
             MessageHandler(filters.Regex("^Закладные$"), zakladki_button_handler),
             MessageHandler(filters.Regex("^Рекламация$"), reklamacia_button_handler),
+            MessageHandler(filters.Regex("^КБ$"), kb_button_handler),  # <-- НОВОЕ
         ],
         states={
             WAITING_FOR_FULL_NAME: [MessageHandler(filters.TEXT & ~filters.COMMAND, handle_full_name_input)],
